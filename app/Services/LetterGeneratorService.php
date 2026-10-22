@@ -3,7 +3,9 @@
 namespace App\Services;
 
 use App\Models\GeneratedLetter;
+use App\Models\GeneratedLetterSigner;
 use App\Models\Submission;
+use Illuminate\Support\Str;
 
 class LetterGeneratorService
 {
@@ -11,12 +13,7 @@ class LetterGeneratorService
         protected DocumentNamingService $namingService
     ) {}
 
-    /**
-     * Generate or retrieve official GeneratedLetter record with letter_number and qr_token upon final approval.
-     *
-     * @param Submission $submission
-     * @return GeneratedLetter
-     */
+    /** Generate or retrieve the official letter and its per-signer verification records. */
     public function generateLetterForSubmission(Submission $submission): GeneratedLetter
     {
         $submission->loadMissing([
@@ -29,6 +26,7 @@ class LetterGeneratorService
 
         $existingLetter = GeneratedLetter::where('submission_id', $submission->id)->first();
         if ($existingLetter && !empty($existingLetter->letter_number)) {
+            $this->syncSignerRecords($existingLetter, $submission);
             return $existingLetter;
         }
 
@@ -56,7 +54,7 @@ class LetterGeneratorService
             ->count() + 1;
 
         $letterNumber = sprintf('%s/%d/D3TI/AMIKOM/%s/%s', $letterCode, $monthlySequence, $romanMonth, $year);
-        $qrToken = sprintf('VERIFY-%s-%04d-%s', $letterCode, $submission->id, strtoupper(\Illuminate\Support\Str::random(8)));
+        $qrToken = sprintf('VERIFY-%s-%04d-%s', $letterCode, $submission->id, strtoupper(Str::random(8)));
         $filePath = $this->namingService->generateFilePath($submission);
 
         $generatedLetter = GeneratedLetter::updateOrCreate(
@@ -69,19 +67,67 @@ class LetterGeneratorService
             ]
         );
 
+        // Create or sync a per-signer record with its own verification token.
+        $this->syncSignerRecords($generatedLetter, $submission);
+
         return $generatedLetter;
     }
 
+    /** Create or sync signer records for each approver with a unique verification token. */
+    public function syncSignerRecords(GeneratedLetter $generatedLetter, Submission $submission): void
+    {
+        $rawSigners = $this->extractSignersContext($submission);
+
+        $templateCode = $submission->letterType && !empty($submission->letterType->code)
+            ? strtoupper(trim($submission->letterType->code))
+            : 'SK';
+
+        $rawSigners = $this->assignSignerPositions($rawSigners, $templateCode);
+
+        // Skip when existing records are complete, including approver_nip.
+        $existingCount = $generatedLetter->signers()->count();
+        $hasCompleteData = $existingCount === count($rawSigners) 
+            && $generatedLetter->signers()->whereNotNull('approver_nip')->count() === count($rawSigners);
+
+        if ($hasCompleteData) {
+            return;
+        }
+
+        // Otherwise, delete and re-sync incomplete or mismatched records.
+        $generatedLetter->signers()->delete();
+
+        foreach ($rawSigners as $signer) {
+            $generatedLetter->signers()->create([
+                'user_id'             => $signer['user_id'] ?? null,
+                'approver_name'       => $signer['name'],
+                'approver_role'       => $signer['title'] ?? $signer['role'] ?? null,
+                'approver_nip'        => $signer['nip'] ?? null,
+                'approver_department' => $signer['department'] ?? 'Prodi D3 Teknik Informatika',
+                'qr_position'         => $signer['qr_position'],
+                'qr_row'              => $signer['qr_row'],
+                'verification_token'  => Str::random(64),
+                'approved_at'         => $signer['approved_at'] ?? null,
+            ]);
+        }
+    }
+
     /**
-     * Extract structured signers context array from approved submission logs.
-     * Supports both single signer and multi-signer workflows.
-     *
-     * @param Submission $submission
-     * @return array
+     * Backward-compatible alias for syncSignerRecords.
      */
+    public function createSignerRecords(GeneratedLetter $generatedLetter, Submission $submission): void
+    {
+        $this->syncSignerRecords($generatedLetter, $submission);
+    }
+
+    /** Extract structured signer data from approval logs or flow steps for single, multi, and preview modes. */
     public function extractSignersContext(Submission $submission): array
     {
-        $submission->loadMissing(['logs.user', 'logs.approvalFlowStep', 'student.user']);
+        $submission->loadMissing([
+            'logs.user', 
+            'logs.approvalFlowStep', 
+            'student.user',
+            'letterType.approvalFlow.steps',
+        ]);
 
         $studentUserId = $submission->student?->user_id;
 
@@ -103,28 +149,59 @@ class LetterGeneratorService
             ->sortBy('created_at')
             ->values();
 
+        // Preview mode (no approved approval logs yet).
         if ($approvedLogs->isEmpty()) {
+            $flowSteps = $submission->letterType?->approvalFlow?->steps?->sortBy('step_order');
+            if ($flowSteps && $flowSteps->isNotEmpty()) {
+                $previewLecturers = $this->resolvePreviewLecturers($submission->student);
+                $signers = [];
+                foreach ($flowSteps as $step) {
+                    $role = $step->approval_role;
+                    $roleVal = is_object($role) ? $role->value : (string) $role;
+                    $roleTitle = method_exists($role, 'label') ? $role->label() : ($step->name ?? 'Pejabat Berwenang');
+                    $lecturer = $previewLecturers[$roleVal] ?? null;
+
+                    $signers[] = [
+                        'user_id'     => $lecturer?->user_id,
+                        'title'       => $roleTitle,
+                        'department'  => 'Prodi D3 Teknik Informatika',
+                        'name'        => $lecturer?->user?->name ?? 'Dr. Nama Dosen, M.Kom',
+                        'nip'         => $lecturer?->user?->nip ?? $lecturer?->user?->username ?? '190302126',
+                        'city'        => 'Yogyakarta',
+                        'date'        => $this->formatIndonesianDate(now()),
+                        'approved_at' => null,
+                    ];
+                }
+                return $signers;
+            }
+
             return [
                 [
-                    'title' => 'Ketua Program Studi',
-                    'department' => 'Prodi D3 Teknik Informatika',
-                    'name' => 'Dr. Barka Satya, M.Kom',
-                    'nip' => '190302126',
-                    'city' => 'Yogyakarta',
-                    'date' => $this->formatIndonesianDate(now()),
+                    'user_id'     => null,
+                    'title'       => 'Ketua Program Studi',
+                    'department'  => 'Prodi D3 Teknik Informatika',
+                    'name'        => 'Dr. Barka Satya, M.Kom',
+                    'nip'         => '190302126',
+                    'city'        => 'Yogyakarta',
+                    'date'        => $this->formatIndonesianDate(now()),
+                    'approved_at' => null,
                 ],
             ];
         }
 
-        // Deduplicate logs by user_id so a lecturer who approves multiple steps appears only once
-        $uniqueUserLogs = collect();
+        // Deduplicate by approval step so one lecturer signing multiple steps gets separate slots.
+        $uniqueStepLogs = collect();
         foreach ($approvedLogs as $log) {
-            $key = $log->user_id ?? ('log_' . $log->id);
-            $uniqueUserLogs->put($key, $log);
+            $key = $log->approval_flow_step_id ?? ('log_' . $log->id);
+            $uniqueStepLogs->put($key, $log);
         }
 
+        $sortedLogs = $uniqueStepLogs->values()->sortBy(function ($log) {
+            return $log->approvalFlowStep?->step_order ?? 999;
+        })->values();
+
         $signers = [];
-        foreach ($uniqueUserLogs as $log) {
+        foreach ($sortedLogs as $log) {
             $title = 'Pejabat Berwenang';
             if ($log->approvalFlowStep) {
                 $title = $log->approvalFlowStep->name;
@@ -133,17 +210,136 @@ class LetterGeneratorService
                 }
             }
 
+            $studentDept = $submission->student?->department ?? 'Prodi D3 Teknik Informatika';
+            if (!empty($studentDept) && !str_starts_with(strtolower($studentDept), 'prodi')) {
+                $studentDept = 'Prodi ' . $studentDept;
+            }
+
             $signers[] = [
-                'title' => $title,
-                'department' => 'Universitas AMIKOM Yogyakarta',
-                'name' => $log->user ? $log->user->name : 'Sistem Kampus',
-                'nip' => $log->user ? ($log->user->nip ?? $log->user->username ?? '-') : '-',
-                'city' => 'Yogyakarta',
-                'date' => $this->formatIndonesianDate($log->created_at ?? now()),
+                'user_id'     => $log->user_id,
+                'title'       => $title,
+                'department'  => $studentDept,
+                'name'        => $log->user ? $log->user->name : 'Sistem Kampus',
+                'nip'         => $log->user ? ($log->user->nip ?? $log->user->username ?? '-') : '-',
+                'city'        => 'Yogyakarta',
+                'date'        => $this->formatIndonesianDate($log->created_at ?? now()),
+                'approved_at' => $log->created_at,
             ];
         }
 
         return $signers;
+    }
+
+    /** Resolve related lecturers for preview mode when no approval logs exist yet. */
+    protected function resolvePreviewLecturers($student): array
+    {
+        $studentLecturers = collect();
+        if ($student?->id) {
+            $studentLecturers = \App\Models\StudentLecturer::query()
+                ->where('student_id', $student->id)
+                ->where('is_active', true)
+                ->with('lecturer.user')
+                ->get();
+        }
+
+        $positions = \App\Models\LecturerPosition::query()
+            ->where('is_active', true)
+            ->with('lecturer.user')
+            ->get();
+
+        $academicAdvisor = $studentLecturers->firstWhere('lecturer_role', \App\Enums\ApprovalRole::ACADEMIC_ADVISOR->value)?->lecturer;
+
+        $supervisor = $studentLecturers->first(function ($sl) {
+            $role = is_object($sl->lecturer_role) ? $sl->lecturer_role->value : (string) $sl->lecturer_role;
+            return in_array($role, [
+                \App\Enums\ApprovalRole::THESIS_SUPERVISOR->value,
+                \App\Enums\ApprovalRole::INTERNSHIP_SUPERVISOR->value,
+                'THESIS_SUPERVISOR',
+                'INTERNSHIP_SUPERVISOR',
+            ], true);
+        })?->lecturer;
+
+        $kaprodi = $positions->firstWhere('position', \App\Enums\ApprovalRole::HEAD_OF_STUDY_PROGRAM->value)?->lecturer;
+
+        return [
+            \App\Enums\ApprovalRole::ACADEMIC_ADVISOR->value       => $academicAdvisor,
+            \App\Enums\ApprovalRole::HEAD_OF_STUDY_PROGRAM->value  => $kaprodi,
+            \App\Enums\ApprovalRole::INTERNSHIP_SUPERVISOR->value  => $supervisor,
+            \App\Enums\ApprovalRole::THESIS_SUPERVISOR->value      => $supervisor,
+        ];
+    }
+
+    /** Assign qr_position and qr_row to each signer based on the letter type layout config. */
+    public function assignSignerPositions(array $signers, string $templateCode): array
+    {
+        $layout = config("letter_signature.layouts.{$templateCode}");
+
+        if (!$layout) {
+            $signerCount = count($signers);
+            $defaultConfig = config('letter_signature.default');
+            if (is_array($defaultConfig) && isset($defaultConfig[$signerCount])) {
+                $layout = $defaultConfig[$signerCount];
+            } elseif (is_array($defaultConfig) && isset($defaultConfig[0])) {
+                $layout = $defaultConfig;
+            } else {
+                $layout = match($signerCount) {
+                    2 => [['left', 'right']],
+                    3 => [['left', 'center', 'right']],
+                    default => [['right']],
+                };
+            }
+        }
+
+        // Build the list of position slots from the layout config.
+        $slots = [];
+        foreach ($layout as $rowIndex => $rowPositions) {
+            foreach ($rowPositions as $position) {
+                if (!in_array($position, ['left', 'center', 'right'], true)) {
+                    continue;
+                }
+                $slots[] = [
+                    'row'      => $rowIndex,
+                    'position' => $position,
+                ];
+            }
+        }
+
+        foreach ($signers as $index => &$signer) {
+            if (isset($slots[$index])) {
+                $slot = $slots[$index];
+            } else {
+                // Extra signers beyond the config get additional rows.
+                $extraIndex        = $index - count($slots);
+                $fallbackPositions = ['left', 'center', 'right'];
+                $slot = [
+                    'row'      => count($layout) + intdiv($extraIndex, 3),
+                    'position' => $fallbackPositions[$extraIndex % 3],
+                ];
+            }
+
+            $signer['qr_position'] = $slot['position'];
+            $signer['qr_row']      = $slot['row'];
+        }
+        unset($signer);
+
+        return $signers;
+    }
+
+    /** Build per-signer view data including generated QR data URIs. */
+    public function buildSignerViewData(GeneratedLetter $generatedLetter, QrCodeService $qrCodeService): \Illuminate\Support\Collection
+    {
+        return $generatedLetter->signers()
+            ->with('user')
+            ->orderBy('qr_row')
+            ->orderBy('id')
+            ->get()
+            ->map(function ($signer) use ($qrCodeService) {
+                $url = route('public.verify.approver', ['token' => $signer->verification_token]);
+                $signer->qr_data_uri = $qrCodeService->generateDataUri($url);
+                $signer->nip = $signer->approver_nip ?? $signer->user?->nip ?? $signer->user?->username ?? '-';
+                $signer->department = $signer->approver_department ?? 'Prodi D3 Teknik Informatika';
+                return $signer;
+            });
     }
 
     /**
@@ -170,9 +366,9 @@ class LetterGeneratorService
             }
 
             if ($date) {
-                $day = $date->format('j');
+                $day   = $date->format('j');
                 $month = $months[(int)$date->format('n')];
-                $year = $date->format('Y');
+                $year  = $date->format('Y');
                 return "{$day} {$month} {$year}";
             }
         } catch (\Throwable $e) {

@@ -4,7 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Enums\SubmissionStatus;
 use App\Models\GeneratedLetter;
+use App\Models\GeneratedLetterSigner;
 use Illuminate\Http\Request;
+
 
 class PublicVerificationController extends Controller
 {
@@ -142,4 +144,54 @@ class PublicVerificationController extends Controller
             'approvalLogs' => $approvalLogs,
         ]);
     }
+
+    /** Handle per-approver verification via a unique signer token. */
+    public function verifyApprover(string $token)
+    {
+        $signer = GeneratedLetterSigner::with([
+            'generatedLetter.submission.letterType',
+            'generatedLetter.submission.student.user',
+        ])
+            ->where('verification_token', $token)
+            ->first();
+
+        if (!$signer) {
+            return view('verify.approver', [
+                'isValid'  => false,
+                'token'    => $token,
+                'message'  => 'Token verifikasi penyetuju tidak ditemukan dalam sistem.',
+                'signer'   => null,
+            ]);
+        }
+
+        $generatedLetter = $signer->generatedLetter;
+        $submission      = $generatedLetter?->submission;
+
+        // Ensure the letter is approved before showing verification.
+        $isApproved = $submission && (
+            $submission->status === SubmissionStatus::APPROVED ||
+            $submission->status === SubmissionStatus::GENERATED
+        );
+
+        if (!$isApproved) {
+            return view('verify.approver', [
+                'isValid'  => false,
+                'token'    => $token,
+                'message'  => 'Surat ini belum mendapatkan persetujuan akhir.',
+                'signer'   => $signer,
+            ]);
+        }
+
+        return view('verify.approver', [
+            'isValid'        => true,
+            'token'          => $token,
+            'signer'         => $signer,
+            'generatedLetter' => $generatedLetter,
+            'letterNumber'   => $generatedLetter->letter_number,
+            'letterTypeName' => $submission->letterType?->name ?? '-',
+            'studentName'    => $submission->student?->user?->name ?? '-',
+            'studentNim'     => $submission->student?->student_number ?? '-',
+        ]);
+    }
 }
+

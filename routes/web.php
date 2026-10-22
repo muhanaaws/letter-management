@@ -19,6 +19,10 @@ Route::get('/', function () {
 // Public Letter Verification Route (Scan QR Code)
 Route::get('/verify/{token}', [PublicVerificationController::class, 'verify'])->name('verify.letter');
 
+// Per-approver verification route — each signer's QR points here.
+Route::get('/verify/approver/{token}', [PublicVerificationController::class, 'verifyApprover'])->name('public.verify.approver');
+
+
 Route::middleware('auth')
     ->group(function () {
 

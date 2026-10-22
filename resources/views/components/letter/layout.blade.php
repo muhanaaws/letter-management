@@ -54,7 +54,7 @@
 
                 @if(isset($signature))
                     {{ $signature }}
-                @elseif(is_array($signers) && count($signers) > 0)
+                @elseif(!empty($signers) && ((is_array($signers) && count($signers) > 0) || ($signers instanceof \Illuminate\Support\Collection && $signers->isNotEmpty())))
                     <x-letter.signature :signers="$signers" :qrToken="$qrToken" :isPlaceholder="$isPlaceholder" />
                 @elseif(is_array($signatureProps))
                     <x-letter.signature 

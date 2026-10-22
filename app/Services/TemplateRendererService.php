@@ -42,7 +42,7 @@ class TemplateRendererService
         array $contextData = [], 
         array $signatureProps = [], 
         string $documentTitle = 'Surat Resmi - Universitas AMIKOM Yogyakarta',
-        ?array $signers = null,
+        array|\Illuminate\Support\Collection|null $signers = null,
         ?string $qrToken = null,
         ?string $customCss = null
     ) {

@@ -44,7 +44,7 @@ class LetterPreviewService
         $submission->loadMissing([
             'letterType.activeTemplate',
             'student.user',
-            'generatedLetter',
+            'generatedLetter.signers',
             'logs.user',
             'logs.approvalFlowStep',
             'groupMembers.student.user',
@@ -55,8 +55,29 @@ class LetterPreviewService
         $activeTemplate = $submission->letterType?->activeTemplate;
         $bodyTemplateHtml = $activeTemplate?->body_content ?? '<div class="doc-title-main">SURAT DOKUMEN AKADEMIK</div>';
 
-        $signers = $this->letterGenerator->extractSignersContext($submission);
-        $qrToken = $submission->generatedLetter?->qr_token ?? ('PREVIEW-SR-' . $submission->id);
+        $generatedLetter = $submission->generatedLetter;
+
+        if ($generatedLetter) {
+            $this->letterGenerator->syncSignerRecords($generatedLetter, $submission);
+            $generatedLetter->unsetRelation('signers');
+        }
+
+        // Use stored signers with per-signer QR when issued, otherwise use mapped preview signers.
+        if ($generatedLetter && $generatedLetter->signers->isNotEmpty()) {
+            $qrService = app(\App\Services\QrCodeService::class);
+            $signersData = $this->letterGenerator->buildSignerViewData($generatedLetter, $qrService);
+            $qrToken = $generatedLetter->qr_token;
+        } else {
+            $rawSigners = $this->letterGenerator->extractSignersContext($submission);
+            $templateCode = $submission->letterType && !empty($submission->letterType->code)
+                ? strtoupper(trim($submission->letterType->code))
+                : 'SK';
+            $signersWithPos = $this->letterGenerator->assignSignerPositions($rawSigners, $templateCode);
+            $signersData = collect($signersWithPos)->map(function ($s) {
+                return (object) $s;
+            });
+            $qrToken = $generatedLetter?->qr_token ?? ('PREVIEW-SR-' . $submission->id);
+        }
 
         $embeddedCss = null;
         if ($isIframeMode || !empty($extraContext['is_iframe'])) {
@@ -68,11 +89,12 @@ class LetterPreviewService
             $contextData,
             [],
             $submission->letterType?->name ?? 'Surat Resmi AMIKOM',
-            $signers,
+            $signersData,
             $qrToken,
             $embeddedCss
         );
     }
+
 
     /**
      * Build context placeholder array for a submission.
