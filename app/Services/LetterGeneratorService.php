@@ -334,7 +334,7 @@ class LetterGeneratorService
             ->orderBy('id')
             ->get()
             ->map(function ($signer) use ($qrCodeService) {
-                $url = route('public.verify.approver', ['token' => $signer->verification_token]);
+                $url = $qrCodeService->publicUrl('verify/approver/' . rawurlencode($signer->verification_token));
                 $signer->qr_data_uri = $qrCodeService->generateDataUri($url);
                 $signer->nip = $signer->approver_nip ?? $signer->user?->nip ?? $signer->user?->username ?? '-';
                 $signer->department = $signer->approver_department ?? 'Prodi D3 Teknik Informatika';

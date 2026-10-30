@@ -1,6 +1,9 @@
 <?php
 
 return [
+    // Public base URL encoded into QR codes; falls back to APP_URL when empty.
+    'verification_base_url' => env('LETTER_VERIFICATION_BASE_URL'),
+
     // Signature layout per letter type, keyed by letter_types.code, with rows of left/center/right positions.
     'layouts' => [
         // Letters with 1 signer (Kaprodi or academic advisor, right-aligned)

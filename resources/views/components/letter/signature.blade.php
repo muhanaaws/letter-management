@@ -81,7 +81,9 @@
         ? 'Pratinjau: QR Verifikasi Aktif Setelah Disetujui'
         : 'Imbas QR untuk verifikasi keabsahan';
 
-    $legacyTargetUrl = $qrUrl ?? ($qrToken ? route('verify.letter', $qrToken) : url('/verify/DEMO-TOKEN-2026'));
+    $legacyTargetUrl = $qrUrl ?? ($qrToken
+        ? $qrService->publicUrl('verify/' . rawurlencode((string) $qrToken))
+        : $qrService->publicUrl('verify/DEMO-TOKEN-2026'));
 
     // Normalize all data modes into one uniform structure
     $rawSigners = [];
@@ -137,7 +139,7 @@
 
         $token = $read($signer, ['verification_token']);
         $url   = !empty($token)
-            ? route('public.verify.approver', ['token' => $token])
+            ? $qrService->publicUrl('verify/approver/' . rawurlencode((string) $token))
             : $legacyTargetUrl;
 
         $qrSvg = $qrService->generateSvg($url, 160);
